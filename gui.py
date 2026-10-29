@@ -436,7 +436,8 @@ def default_out_dir(iso: str) -> str:
     if iso:
         p = Path(iso)
         return str(p.parent / (p.stem if "yakuza" in p.stem.lower() else "yakuza-out"))
-    return str(ROOT / "out")
+    # no ISO found: never default into the bundle itself
+    return str((Path.home() if FROZEN else ROOT) / ("Yakuza (USA)" if FROZEN else "out"))
 
 
 def _blender_path():
