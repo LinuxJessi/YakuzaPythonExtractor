@@ -1,31 +1,52 @@
 # Yakuza (PS2) Python Extractor
 
-An extract → browse → **mod** kit for **Yakuza (USA, SLUS-21348)** on
-PlayStation 2, written in pure Python with **no required dependencies**.
-Point it at your own legally obtained disc image and it will:
+Unpacks, converts and repacks the files on the **Yakuza (USA, SLUS-21348)**
+PlayStation 2 disc. Pure Python, nothing to install for the core. Point it
+at your own disc image and it will:
 
-* **unpack** all 15,612 files (4.3 GB) hidden inside the four CRI
-  `OGRE*.CVM` volumes — without needing the CVM password, because the game
-  ships its own directory index;
-* **convert** them to formats your desktop opens: textures → PNG (83k),
-  models → OBJ + MTL (37k meshes, textures bound), characters → Blender,
-  voice and music → WAV, sound effects → WAV, movies → MP4, plus rendered
-  preview images of every mesh;
-* **write mods back** into a bootable ISO: swap any file, or import a PNG
+* unpack all 15,612 files (4.3 GB) inside the four `OGRE*.CVM` volumes. The
+  CVM password is not needed: the game carries its own directory index;
+* convert them to things you can open: textures to PNG (83k), models to
+  OBJ + MTL with textures attached (37k meshes), characters into Blender,
+  voice and music to WAV, sound effects to WAV, movies to MP4, and a
+  rendered preview picture of every mesh;
+* write changes back into a bootable ISO: swap any file, or put a PNG
   straight into a texture slot.
 
-This tool ships no game data. It is the companion to the
+**Status: works on my disc, looking for testers.** Texture mods have been
+booted in PCSX2 (see below). If something fails on your image or machine,
+[open an issue](https://github.com/LinuxJessi/YakuzaPythonExtractor/issues)
+with what happened.
+
+No game data is in this repo, apart from a few seconds of audio in
+`docs/samples/` so you can hear what the converters produce. It is the
+companion to the
 [Xenosaga I](https://github.com/LinuxJessi/Xenosaga1PythonExtractor) and
 [Xenosaga III](https://github.com/LinuxJessi/Xenosaga3PythonExtractor)
-extractors — same spirit, same GUI, a completely different engine. Every
-format here was reversed from the disc and the game's executable; the
-write-up is in [docs/FORMATS.md](docs/FORMATS.md).
+extractors: same GUI, different engine. The file formats are written up
+in [docs/FORMATS.md](docs/FORMATS.md).
 
 ---
 
 ## Quick start
 
-### The GUI (recommended)
+### The app (nothing to install)
+
+Download the bundle for your system from the
+[Releases page](https://github.com/LinuxJessi/YakuzaPythonExtractor/releases),
+unzip it, and double-click:
+
+| | |
+|---|---|
+| Windows | `Yakuza-Extractor-windows/Yakuza-Extractor.exe` — SmartScreen may ask once (unsigned download): *More info → Run anyway*. Unzip the whole folder; the GUI needs `yakuza-cli.exe` next to it. |
+| macOS | `Yakuza-Extractor.app` — first time: right-click → Open (Gatekeeper, the app is not notarized) |
+
+The bundle carries Python, numpy, Pillow and a portable ffmpeg, so every
+card works out of the box; only *Open in Blender* needs Blender installed.
+`yakuza-cli` in the same folder is the command line (`yakuza-cli cli probe …`,
+`yakuza-cli browse textures …`, one word per script below).
+
+### From a source checkout
 
 | OS | Double-click | or from a terminal |
 |---|---|---|
@@ -33,19 +54,51 @@ write-up is in [docs/FORMATS.md](docs/FORMATS.md).
 | macOS | `launch.command` (first time: right-click → Open) | `python3 gui.py` |
 | Linux | `launch.sh` | `python3 gui.py` |
 
-A local web page opens with one card per command — **list / extract /
-census / textures / models / previews / Blender / voice+music / sound
-effects / movies / import texture / replace file / verify** — each with
-file pickers and a live log. It auto-detects your ISO and shows which
-optional tools it found. Everything the GUI does shells out to the scripts
-below, so GUI and command line can never disagree.
+Python 3.9 or newer. Unpacking, textures, models, sound effects and
+repacking need nothing else; `pip install -r requirements.txt` (numpy +
+Pillow) adds the rendered previews and PNG texture import, and ffmpeg on
+PATH adds voice, music and movies.
+
+### The GUI
+
+A local web page opens with one collapsible card per command, in four
+groups:
+
+| Group | Cards |
+|---|---|
+| Disc | **check the disc** (serial, volumes, file count), **list**, **extract** (writes `manifest.csv`, resumable), **verify the dump** (against the manifest, and the disc itself), census |
+| Convert | **convert everything** (one click: textures, models, previews, voice + music, sound effects, movies; kinds whose tool is missing are skipped, not fatal), and one card per kind |
+| Look | **open a character in Blender** (presets for Kiryu, Majima, a street block, or any set / path) |
+| Mod | **import a texture**, **replace a file**, **verify an ISO** |
+
+Every card has file pickers (your ISOs are detected and offered as quick
+picks), a **Show command** button that prints the exact command line it
+would run, and an **Open output folder** button afterwards. The right-hand
+panel shows which optional tools were found (ffmpeg, numpy, Pillow,
+Blender, the sound-effect decoder), whether the chosen ISO really is the
+Yakuza (USA) disc, the list of jobs run this session with a **Stop** button
+for the running one, and the live log. Paths are checked before a job
+starts, so a typo is a one-line error, not a traceback. A single **work
+folder** holds everything: `WORK/dump/` for the files and
+`WORK/browse/{textures,models,previews,audio,sfx,movies}/` for the
+conversions.
+
+![The GUI](docs/gui.jpg)
+
+Everything the GUI does shells out to the scripts below, so GUI and
+command line can never disagree.
 
 ### The command line
 
 ```sh
-python3 cli.py list    "Yakuza (USA).iso"                 # every file: size, LBA, path
-python3 cli.py extract "Yakuza (USA).iso" --out dump      # unpack, in-game tree
+python3 cli.py probe   "Yakuza (USA).iso"                 # serial, volumes, file count: is this the right disc?
+python3 cli.py list    "Yakuza (USA).iso" [--volume MEDIA3] [--filter E333]   # every file: size, LBA, path
+python3 cli.py extract "Yakuza (USA).iso" --out dump      # unpack, in-game tree + manifest.csv (--skip-existing resumes)
+python3 cli.py verify-dump dump --iso "Yakuza (USA).iso"  # every manifest row: present, right size, first 4 KB match the disc
 python3 cli.py census  "Yakuza (USA).iso"                 # extension × magic table
+
+python3 cli.py convert --dump dump --out out              # the whole browse pipeline below in one command
+                       [--kinds textures,models,previews,audio,sfx,movies] [--filter E333] [--jobs 8]
 
 python3 browse.py textures dump out/textures              # TXBP packs → PNG
 python3 browse.py models   dump out/models                # OME meshes → OBJ + MTL
@@ -66,14 +119,17 @@ Every converter takes `--filter SUBSTRING` to limit itself to matching
 in-game paths (`--filter MEDIA/PLAYER`, `--filter E230`) and `--jobs N`
 for parallelism.
 
-### Requirements
+### Building the app yourself
 
-* Python 3.9+ — unpacking, textures, models and repacking need nothing else.
-* Optional: `numpy` + `Pillow` for rendered previews and PNG texture
-  import; `ffmpeg` on PATH for voice/music/movies; Blender for
-  `blender_open.py`; the Xenosaga III kit's `dap_decode.py` (found
-  automatically if the two kits sit side by side, or copy it in) for sound
-  effects.
+```sh
+python -m pip install pyinstaller numpy pillow
+python build.py --clean          # dist/Yakuza-Extractor-windows/ on Windows, dist/Yakuza-Extractor.app on macOS
+```
+
+PyInstaller does not cross-compile, so build on the OS you want binaries
+for. Drop a portable `ffmpeg` / `ffmpeg.exe` into `packaging/tools/` first
+and it is bundled. The GitHub Actions workflow builds both bundles on
+every `v*` tag and attaches them to a draft release.
 
 ---
 
@@ -150,11 +206,10 @@ the engine's own LZSS, written back into the container with every offset
 preserved, and the disc index updated. The only constraint is that the new
 texture must compress to no more than the original — flat or painterly
 edits always do; heavy photo detail may not, and the tool tells you.
-Verified with a round trip: a red-tinted suit imported into a copy of the
-disc, re-extracted, and converted comes back red (through the palette
-quantisation), the index verifies, and neighbouring files are untouched.
-Not yet confirmed in-game on hardware or PCSX2 — if you try it, say so in
-an issue.
+Checked two ways: a red-tinted suit imported into a copy of the disc
+comes back red when re-extracted (through the palette quantisation) with
+neighbouring files untouched, and the patched ISO boots in PCSX2 with the
+change showing in-game (screenshots below).
 
 ### Replacing any file (translation and other data mods)
 
@@ -166,17 +221,17 @@ plain, and the game resolves paths through `OGREDIR*.BIN`, never through
 the scrambled ISO directories.
 
 **Translation status.** The USA release is already English. The dialogue
-files (`MEDIA/TALK/**/TALK_*.BIN`) contain no readable strings — text is
-stored as glyph indices into the game's font sheets — so a text
-export/import pair is the open piece of a re-translation pipeline; the
-repacker, container walker and AVLZ compressor it would sit on are done.
+files (`MEDIA/TALK/**/TALK_*.BIN`) have no readable strings; the text is
+stored as glyph indices into the game's font sheets. A text export/import
+pair is the missing piece for a re-translation. The repacker, container
+walker and AVLZ compressor it needs are in place.
 See the open threads in [docs/FORMATS.md](docs/FORMATS.md).
 
 ### Audio and video
 
 Voice, music and movies are stock CRI formats, so `media.py` only drives
-ffmpeg — with one twist: 80% of the voice clips use an AHX header variant
-ffmpeg refuses, which the tool relabels on the fly. Sound-effect banks are
+ffmpeg. One catch: 80% of the voice clips use an AHX header variant that
+ffmpeg refuses, so the tool relabels that byte on the way in. Sound-effect banks are
 the same `ps2_DTPK` container Xenosaga III uses, decoded with that kit's
 pure-Python SPU-ADPCM decoder.
 
@@ -197,20 +252,40 @@ pure-Python SPU-ADPCM decoder.
 | `render.py` | numpy software rasteriser → textured preview PNGs |
 | `blender_open.py` | assemble a character / folder and open it in Blender |
 | `media.py` | ffmpeg-driven voice/music/movie conversion, DTPK SE banks |
+| `dap_decode.py` | the `ps2_DTPK` sound-bank decoder (pure-Python SPU ADPCM; shared with the Xenosaga III kit) |
 | `repack.py` | write files and textures back into the ISO; verify |
-| `cli.py`, `browse.py`, `gui.py` | the commands, and the local web GUI over them |
+| `cli.py` | probe / list / extract (+ manifest) / verify-dump / census / convert |
+| `browse.py`, `gui.py` | the texture and model converters, and the local web GUI over all of the above |
+| `tool.py`, `build.py`, `packaging/` | the one-word dispatcher the bundled `yakuza-cli` runs, and the PyInstaller build |
 
-## How it was reversed
+## Audio samples
 
-In one session against the retail disc: the CVM/ROFS layout and the
-`OGREDIR` index from `MAIN.BIN`'s strings; AVLZ by brute-forcing LZSS
-variants against the first directory block; the container format, TXBP
-texture layout (including CSM1 palette order and mip chains) and the OME
-mesh format (four vertex layouts, triangle strips, texture-id binding) from
-the data itself, each verified by rendering. Details and remaining open
-threads: [docs/FORMATS.md](docs/FORMATS.md).
+Short clips from the converters, so you know what to expect before
+running them (96 kbps MP3, in `docs/samples/`):
+
+| File | What it is |
+|---|---|
+| `bgm_btl_boss_excerpt.mp3` | first 20 s of the boss battle theme (`MEDIA2/BGM/BTL_BOSS.ADX`) |
+| `bgm_club_floor_excerpt.mp3` | 15 s of the club floor ambience (`AMB_CLUB_FLOOR.ADX`) |
+| `voice_kiryu_17_034.mp3` | a Kiryu line from chapter 17 (`MEDIA2/SOUND/KIRYU_17_034.AHX`) |
+| `voice_haruka_06_025.mp3` | a Haruka line from chapter 6 |
+| `voice_nishiki_01_007.mp3` | a Nishiki line from chapter 1 |
+| `sfx_02028_AMB28_c13.mp3` | one cue from a sound-effect bank (`MEDIA/SE/02028_AMB28.DAT`) |
+
+The voice clips are 48 kHz mono as stored; music is 48 kHz stereo ADX.
+
+## Where the formats came from
+
+Everything here was worked out from the disc and the game's own program.
+The CVM layout and the `OGREDIR` index came from the strings in
+`MAIN.BIN`; AVLZ turned out to be plain LZSS once the right bit order and
+match encoding were tried against the first directory block; the
+container, texture and mesh formats came from staring at the data and
+checking each guess by rendering it. Open questions are listed at the end
+of [docs/FORMATS.md](docs/FORMATS.md). If you know the dialogue text
+encoding or the skeleton format, I would like to hear from you.
 
 ## License
 
-MIT — see [LICENSE](LICENSE). Yakuza is © SEGA; this project contains no
-game assets.
+MIT, see [LICENSE](LICENSE). Yakuza is © SEGA. This repo contains no game
+assets beyond the audio excerpts above.

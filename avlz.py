@@ -61,61 +61,71 @@ def is_avlz(blob: bytes) -> bool:
 
 
 def compress(data: bytes) -> bytes:
-    """Greedy LZSS encoder producing a stream :func:`decompress` accepts.
+    """LZSS encoder producing a stream :func:`decompress` accepts.
 
-    Not byte-identical to SEGA's tool (unknown match policy) but valid, and
-    sufficient to rebuild OGREDIR tables after editing."""
+    Greedy longest-match with a 3-byte-prefix index over the ring buffer
+    (the decoder copies byte-by-byte, so overlapping matches are legal and
+    we emulate that when verifying a candidate). Not byte-identical to
+    SEGA's tool but valid, and within a few percent of its ratio."""
     N_, F_ = N, F
     ring = bytearray(N_)
     r = N_ - F_
     out = bytearray()
+    tokens = []
+    flagbits = nbits = 0
+    index = {}              # 3-byte prefix -> list of ring offsets (most recent last)
+    n = len(data)
     pos = 0
-    tokens: list[bytes] = []
-    flagbits = 0
-    nbits = 0
-    # dictionary: ring content indexed by position; brute-force search
-    while pos < len(data):
+
+    def put(c):
+        nonlocal r
+        ring[r] = c
+        r = (r + 1) % N_
+
+    def remember(start):
+        # index the prefix that now starts at ring offset `start`
+        key = bytes((ring[start], ring[(start + 1) % N_], ring[(start + 2) % N_]))
+        lst = index.setdefault(key, [])
+        lst.append(start)
+        if len(lst) > 192:
+            del lst[0]
+
+    while pos < n:
         best_len, best_off = 0, 0
-        maxlen = min(F_, len(data) - pos)
+        maxlen = min(F_, n - pos)
         if maxlen >= 3:
-            for off in range(N_):
+            key = data[pos:pos + 3]
+            for off in reversed(index.get(key, ())):
                 ln = 0
-                while ln < maxlen and ring[(off + ln) % N_] == data[pos + ln]:
+                rr = r
+                # emulate decoder: source may run into bytes we are writing
+                tmp = {}
+                while ln < maxlen:
+                    src = (off + ln) % N_
+                    c = tmp.get(src, ring[src])
+                    if c != data[pos + ln]:
+                        break
+                    tmp[(rr + ln) % N_] = c
                     ln += 1
-                    # matches may overlap the write cursor only if they
-                    # replicate correctly; the decoder copies byte-by-byte
-                    # from a ring that is being written, so emulate that:
-                    if (off + ln) % N_ == (r + ln) % N_:
-                        pass
                 if ln > best_len:
                     best_len, best_off = ln, off
                     if ln == maxlen:
                         break
         if best_len >= 3:
-            # verify by emulating the decoder's byte-at-a-time copy
-            ok = True
-            tmp = ring[:]
-            rr = r
-            for k in range(best_len):
-                c = tmp[(best_off + k) % N_]
-                if c != data[pos + k]:
-                    ok = False
-                    break
-                tmp[rr] = c
-                rr = (rr + 1) % N_
-            if not ok:
-                best_len = 0
-        if best_len >= 3:
             tokens.append(bytes((best_off & 0xFF, ((best_off >> 4) & 0xF0) | (best_len - 3))))
             for k in range(best_len):
-                ring[r] = data[pos + k]
-                r = (r + 1) % N_
+                start = (r - 2) % N_
+                put(data[pos + k])
+                if pos + k >= 2:
+                    remember(start)
             pos += best_len
         else:
             tokens.append(bytes((data[pos],)))
             flagbits |= 1 << nbits
-            ring[r] = data[pos]
-            r = (r + 1) % N_
+            start = (r - 2) % N_
+            put(data[pos])
+            if pos >= 2:
+                remember(start)
             pos += 1
         nbits += 1
         if nbits == 8:

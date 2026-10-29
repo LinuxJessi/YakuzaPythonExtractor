@@ -1,0 +1,147 @@
+name: Build releases
+
+# One job per OS because PyInstaller does not cross-compile:
+#   * git tag matching v*  — drafts a GitHub Release with both zips attached
+#   * manual workflow_dispatch — same zips as build artefacts (no Release)
+#   * pushes to main that touch code/packaging — smoke build only, no upload
+# Same shape as the Xenosaga I kit's workflow.
+
+on:
+  push:
+    tags: ['v*']
+    branches: [main]
+    paths:
+      - 'packaging/**'
+      - '.github/workflows/release.yml'
+      - '**.py'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  PYTHON_VERSION: '3.12'
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Install build deps
+        run: python -m pip install --upgrade pip pyinstaller numpy pillow
+
+      # Latest BtbN GPL win64 ffmpeg -> packaging/tools/, bundled under tools/.
+      - name: Download portable ffmpeg
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $headers = @{ 'User-Agent' = 'yakuza-extractor-release'; 'Authorization' = "Bearer $env:GH_TOKEN" }
+          $rel = Invoke-RestMethod -Uri 'https://api.github.com/repos/BtbN/FFmpeg-Builds/releases/latest' -Headers $headers
+          $asset = $rel.assets | Where-Object { $_.name -like 'ffmpeg-*-win64-gpl.zip' -and $_.name -notlike '*shared*' } | Select-Object -First 1
+          if (-not $asset) { throw "No matching ffmpeg asset in $($rel.tag_name)" }
+          $zip = "$env:RUNNER_TEMP/ffmpeg.zip"
+          Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $zip -Headers $headers
+          Expand-Archive -Path $zip -DestinationPath "$env:RUNNER_TEMP/ffmpeg-unpacked"
+          $exe = Get-ChildItem -Path "$env:RUNNER_TEMP/ffmpeg-unpacked" -Recurse -Filter ffmpeg.exe | Select-Object -First 1
+          if (-not $exe) { throw "ffmpeg.exe not found in unpacked archive" }
+          Copy-Item $exe.FullName "packaging/tools/ffmpeg.exe"
+
+      - name: Build
+        run: python build.py --clean
+
+      # The frozen CLI must at least answer; the GUI must start and serve its page.
+      - name: Smoke test the bundle
+        shell: pwsh
+        run: |
+          & "dist/Yakuza-Extractor-windows/yakuza-cli.exe" --version
+          & "dist/Yakuza-Extractor-windows/yakuza-cli.exe" cli --help
+          & "dist/Yakuza-Extractor-windows/yakuza-cli.exe" media audio --help | Out-Null
+          $env:PORT = '8771'
+          $p = Start-Process -FilePath "dist/Yakuza-Extractor-windows/Yakuza-Extractor.exe" -ArgumentList '--no-browser' -PassThru
+          Start-Sleep -Seconds 6
+          $r = Invoke-WebRequest -Uri 'http://127.0.0.1:8771/detect' -UseBasicParsing
+          Stop-Process -Id $p.Id -Force
+          if ($r.Content -notmatch '"cli"') { throw "GUI /detect did not answer: $($r.Content)" }
+          Write-Host $r.Content
+
+      - name: Create zip
+        shell: pwsh
+        run: Compress-Archive -Path "dist/Yakuza-Extractor-windows/*" -DestinationPath "Yakuza-Extractor-win64.zip"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Yakuza-Extractor-win64
+          path: Yakuza-Extractor-win64.zip
+          if-no-files-found: error
+
+      - name: Attach to GitHub Release (tag pushes only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          files: Yakuza-Extractor-win64.zip
+          generate_release_notes: true
+
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Install build deps
+        run: python -m pip install --upgrade pip pyinstaller numpy pillow
+
+      - name: Download portable ffmpeg
+        run: |
+          curl -sL -o /tmp/ffmpeg.zip "https://ffmpeg.martin-riedl.de/redirect/latest/macos/arm64/release/ffmpeg.zip"
+          unzip -o -q /tmp/ffmpeg.zip -d packaging/tools/
+          chmod +x packaging/tools/ffmpeg
+          packaging/tools/ffmpeg -version | head -1
+
+      - name: Build
+        run: python build.py --clean
+
+      - name: Smoke test the bundle
+        run: |
+          dist/Yakuza-Extractor-macos/yakuza-cli --version
+          dist/Yakuza-Extractor-macos/yakuza-cli cli --help > /dev/null
+          PORT=8771 dist/Yakuza-Extractor-macos/Yakuza-Extractor --no-browser & GUI=$!
+          sleep 6
+          curl -sf http://127.0.0.1:8771/detect | tee /tmp/detect.json
+          kill $GUI
+          grep -q '"cli"' /tmp/detect.json
+
+      - name: Create zip
+        run: ditto -c -k --keepParent "dist/Yakuza-Extractor.app" "Yakuza-Extractor-macos.zip"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Yakuza-Extractor-macos
+          path: Yakuza-Extractor-macos.zip
+          if-no-files-found: error
+
+      - name: Attach to GitHub Release (tag pushes only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          files: Yakuza-Extractor-macos.zip
+          generate_release_notes: true
+          body: |
+            ### macOS: first launch
+
+            The app is ad-hoc signed, not notarized. After unzipping,
+            right-click **Yakuza-Extractor.app** → **Open** the first time
+            (or run `xattr -dr com.apple.quarantine Yakuza-Extractor.app`).
+            After that it double-clicks normally.
+
+            ### Windows: first launch
+
+            SmartScreen may show "Windows protected your PC" for an unsigned
+            download: **More info → Run anyway**. Unzip the whole folder first;
+            the GUI needs `yakuza-cli.exe` next to it.

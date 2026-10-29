@@ -147,8 +147,11 @@ def _png_rgba(path):
     return im
 
 
-def encode_texture(t: txbp.Texture, png_path: str) -> txbp.Texture:
-    """New Texture with ``t``'s format/size and the PNG's pixels."""
+def encode_texture(t: txbp.Texture, png_path: str, colors: int = 0) -> txbp.Texture:
+    """New Texture with ``t``'s format/size and the PNG's pixels.
+
+    ``colors`` (indexed formats only) caps the palette below the format's
+    16/256 so the result compresses smaller; used by ``--fit``."""
     from PIL import Image
     im = _png_rgba(png_path)
     if im.size != (t.width, t.height):
@@ -160,7 +163,8 @@ def encode_texture(t: txbp.Texture, png_path: str) -> txbp.Texture:
         return txbp.Texture(t.index, t.width, t.height, t.fmt, t.flags, t.tex_id, b"", bytes(px))
     ncol = 16 if t.fmt == txbp.FMT_4BIT else 256
     # quantise RGB, keep alpha per palette entry (mean alpha of its pixels)
-    rgb = im.convert("RGB").quantize(colors=ncol, method=Image.Quantize.MEDIANCUT, dither=Image.Dither.NONE)
+    rgb = im.convert("RGB").quantize(colors=min(ncol, colors) if colors else ncol,
+                                     method=Image.Quantize.MEDIANCUT, dither=Image.Dither.NONE)
     pal = (rgb.getpalette() or [])[:ncol * 3]
     pal += [0] * (ncol * 3 - len(pal))
     idx = list(rgb.getdata())
@@ -219,27 +223,48 @@ def build_txbp(original: bytes, textures) -> bytes:
     return bytes(out)
 
 
-def replace_leaf(blob: bytes, leaf_path: str, new_leaf: bytes) -> bytes:
-    """Return ``blob`` with the leaf at ``leaf_path`` (e.g. '/0/0') replaced in place."""
-    segs = [int(s) for s in leaf_path.strip("/").split("/")]
-    data = bytearray(blob)
+def replace_leaf(blob: bytes, leaf_path: str, new_leaf: bytes, allow_grow: bool = False) -> bytes:
+    """Return ``blob`` with the leaf at ``leaf_path`` (e.g. '/0/0') replaced.
 
-    def rec(base, size, depth):
-        sub = bytes(data[base:base + size])
+    A smaller/equal leaf is written in place (zero padded). A larger one
+    makes every enclosing container rebuild its entry table: later entries
+    shift by the growth (kept 16-byte aligned) and each parent's size
+    entry grows with it. The file itself may then grow; ``patch`` checks
+    that it still fits the original sector footprint.
+    """
+    segs = [int(s) for s in leaf_path.strip("/").split("/")]
+
+    def rec(sub: bytes, depth: int) -> bytes:
         ents = containers.entries(sub)
         if ents is None or depth >= len(segs):
             raise SystemExit(f"{leaf_path}: not a container at depth {depth}")
-        off, sz, _i, _t = ents[segs[depth]]
+        idx = segs[depth]
+        off, sz, eid, tag = ents[idx]
         if depth == len(segs) - 1:
-            if len(new_leaf) > sz:
-                raise SystemExit(f"new leaf is {len(new_leaf)} B but the slot holds {sz} B "
-                                 "(recompressed texture is larger than the original — simplify the image)")
-            data[base + off:base + off + sz] = new_leaf + b"\0" * (sz - len(new_leaf))
-            return
-        rec(base + off, sz, depth + 1)
+            child = new_leaf
+        else:
+            child = rec(sub[off:off + sz], depth + 1)
+        if len(child) <= sz:
+            out = bytearray(sub)
+            out[off:off + sz] = child + b"\0" * (sz - len(child))
+            return bytes(out)
+        if not allow_grow:
+            raise SystemExit(f"{leaf_path}: new leaf is {len(child)} B but the slot holds {sz} B")
+        # grow (experimental — the engine hung on a grown stage archive in testing): rebuild this container's table, shifting entries after `off`
+        delta = (len(child) - sz + 15) & ~15
+        out = bytearray(sub[:off]) + bytearray(child) + b"\0" * (sz + delta - len(child)) + bytearray(sub[off + sz:])
+        cnt = struct.unpack_from("<I", out, 0)[0]
+        for i in range(cnt):
+            o, z, c, t = struct.unpack_from("<IIII", out, 16 + i * 16)
+            if i == idx:
+                struct.pack_into("<II", out, 16 + i * 16, o, len(child))
+            elif o >= off + sz and z:
+                struct.pack_into("<I", out, 16 + i * 16, o + delta)
+            elif o >= off + sz:            # empty slot markers also point past the moved data
+                struct.pack_into("<I", out, 16 + i * 16, o + delta)
+        return bytes(out)
 
-    rec(0, len(blob), 0)
-    return bytes(data)
+    return rec(blob, 0)
 
 
 def cmd_texture(a):
@@ -256,11 +281,25 @@ def cmd_texture(a):
     was_avlz = avlz.is_avlz(leaf)
     pack = containers.inflate(leaf)
     texs = txbp.parse(pack)
-    texs[a.index] = encode_texture(texs[a.index], a.png)
-    new_pack = build_txbp(pack, texs)
-    new_leaf = avlz.compress(new_pack) if was_avlz else new_pack
-    print(f"leaf {a.leaf}: {len(leaf)} B -> {len(new_leaf)} B ({'AVLZ' if was_avlz else 'raw'})")
-    new_body = replace_leaf(body, a.leaf, new_leaf)
+    original = texs[a.index]
+    colors = 0
+    while True:
+        texs[a.index] = encode_texture(original, a.png, colors)
+        new_pack = build_txbp(pack, texs)
+        new_leaf = avlz.compress(new_pack) if was_avlz else new_pack
+        if len(new_leaf) <= len(leaf) or a.allow_grow:
+            break
+        if not a.fit:
+            raise SystemExit(f"leaf {a.leaf}: recompressed {len(new_leaf)} B > slot {len(leaf)} B. "
+                             "Use --fit to reduce colours until it fits, or --allow-grow (experimental: "
+                             "a grown container hung the game in testing).")
+        cap = colors or (16 if original.fmt == txbp.FMT_4BIT else 256)
+        colors = max(2, int(cap * 0.85))
+        if colors <= 2 and len(new_leaf) > len(leaf):
+            raise SystemExit("cannot fit even at 2 colours")
+    print(f"leaf {a.leaf}: {len(leaf)} B -> {len(new_leaf)} B ({'AVLZ' if was_avlz else 'raw'})"
+          + (f", palette capped at {colors} colours to fit" if colors else ""))
+    new_body = replace_leaf(body, a.leaf, new_leaf, allow_grow=a.allow_grow)
     tmp = a.png + ".body.bin"
     with open(tmp, "wb") as fh:
         fh.write(new_body)
@@ -296,7 +335,10 @@ def main(argv=None):
     q.add_argument("--with", dest="with_", required=True); q.add_argument("--out"); q.set_defaults(fn=cmd_patch)
     q = sp.add_parser("texture"); q.add_argument("iso"); q.add_argument("--file", required=True)
     q.add_argument("--leaf", required=True); q.add_argument("--index", type=int, default=0)
-    q.add_argument("--png", required=True); q.add_argument("--out"); q.set_defaults(fn=cmd_texture)
+    q.add_argument("--png", required=True); q.add_argument("--out")
+    q.add_argument("--fit", action="store_true", help="reduce palette size until the texture fits its slot")
+    q.add_argument("--allow-grow", action="store_true", help="experimental: rebuild containers to grow the slot")
+    q.set_defaults(fn=cmd_texture)
     q = sp.add_parser("verify"); q.add_argument("iso"); q.set_defaults(fn=cmd_verify)
     a = p.parse_args(argv)
     a.fn(a)

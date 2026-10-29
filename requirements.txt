@@ -1,0 +1,8 @@
+# Runtime dependencies for the Yakuza (PS2) extractor kit.
+# Unpacking, textures, models, sound effects and repacking are pure stdlib.
+# numpy + Pillow: rendered previews (render.py) and PNG texture import
+# (repack.py texture). ffmpeg on PATH (or bundled in tools/): voice, music,
+# movies. Blender: blender_open.py. The release bundles ship all of the
+# Python side plus ffmpeg, so they need nothing installed.
+numpy>=1.24
+pillow>=9.0

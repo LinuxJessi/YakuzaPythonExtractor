@@ -5,3 +5,7 @@ out/
 dump/
 browse/
 *.iso
+build/
+dist/
+packaging/tools/ffmpeg
+packaging/tools/ffmpeg.exe

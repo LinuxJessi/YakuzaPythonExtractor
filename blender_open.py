@@ -26,10 +26,20 @@ import tempfile
 
 
 def blender_exe():
-    for c in ("/Applications/Blender.app/Contents/MacOS/Blender", shutil.which("blender") or ""):
+    cands = ["/Applications/Blender.app/Contents/MacOS/Blender", shutil.which("blender") or ""]
+    cands += sorted(glob.glob(os.path.expandvars(r"%ProgramFiles%\Blender Foundation\Blender*\blender.exe")), reverse=True)
+    cands += sorted(glob.glob("/snap/blender/current/blender")) + sorted(glob.glob("/opt/blender*/blender"), reverse=True)
+    for c in cands:
         if c and os.path.exists(c):
             return c
-    sys.exit("Blender not found")
+    return None
+
+
+def require_blender():
+    exe = blender_exe()
+    if not exe:
+        sys.exit("Blender not found (install it from blender.org, or put `blender` on PATH)")
+    return exe
 
 
 def collect(models_dir, target):
@@ -112,7 +122,7 @@ bpy.app.timers.register(load, first_interval=1.0)
     print(f"opening {len(files)} meshes:")
     for f in files:
         print("  " + os.path.relpath(f, a[0]))
-    subprocess.Popen([blender_exe(), "--python", script], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    subprocess.Popen([require_blender(), "--python", script], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
 if __name__ == "__main__":
